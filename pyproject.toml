@@ -1,0 +1,32 @@
+[project]
+name = "pdfnet"
+version = "0.0.0"
+description = "PDFNet fine-tuning environment"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    # core
+    "numpy>=1.21",
+    "einops>=0.6",
+    "Pillow>=9.1",                # < 9.1 lacks Image.Resampling used by recent torchvision
+    "opencv-python",
+    "tqdm",
+    "matplotlib",
+    # ML stack
+    "torch>=2.0",
+    "torchvision",
+    "timm>=0.6",
+    "tensorboard",
+    # data + utilities
+    "gdown",                      # download_checkpoint.py
+    "huggingface_hub",
+    "GitPython",
+    # demo / inference (gradio + loadimg only needed for demo.ipynb)
+    "loadimg",
+    "gradio",
+    "gradio_imageslider",
+]
+
+[tool.uv]
+# Default behaviour: reuse system site-packages so the existing CUDA torch
+# install is picked up. Override with `uv venv --no-system-site-packages` if
+# you want a hermetic env (≈2.5 GB of torch+cu126 wheels).
