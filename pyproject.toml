@@ -11,9 +11,9 @@ dependencies = [
     "opencv-python",
     "tqdm",
     "matplotlib",
-    # ML stack
-    "torch>=2.0",
-    "torchvision",
+    # ML stack — pinned to CUDA 12.8 wheels from the PyTorch cu128 index below.
+    "torch>=2.7,<2.9",
+    "torchvision>=0.22,<0.24",
     "timm>=0.6",
     "tensorboard",
     # data + utilities
@@ -27,6 +27,16 @@ dependencies = [
 ]
 
 [tool.uv]
-# Default behaviour: reuse system site-packages so the existing CUDA torch
-# install is picked up. Override with `uv venv --no-system-site-packages` if
-# you want a hermetic env (≈2.5 GB of torch+cu126 wheels).
+# Hermetic env: torch + torchvision are pulled from the PyTorch cu128 index
+# below (CUDA 12.8 wheels), not from PyPI's CPU-only torch. Do NOT pass
+# `--system-site-packages` to `uv venv` or the host's cu13 torch will shadow
+# these. `setup.sh` already creates the venv without that flag.
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
