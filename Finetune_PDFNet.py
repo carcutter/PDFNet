@@ -101,6 +101,11 @@ def get_args_parser():
     p.add_argument("--synthesize_depth", action="store_true",
                    help="if no depth file is found, synthesize pseudo-depth from "
                         "RGB grayscale. Enable until DAM-V2 depth maps are generated.")
+    p.add_argument("--mask_mode", default="red_green", choices=["red_green", "grayscale"],
+                   help="how to binarize the mask PNG. 'red_green' (default for this "
+                        "fork's interior data) treats pure red (interior) + pure green "
+                        "(mirrors) as foreground; everything else is background. "
+                        "'grayscale' uses cv2 BGR2GRAY (the original DIS behavior).")
     # finetune-mode
     p.add_argument("--train_subdir", default="train", type=str)
     p.add_argument("--val_subdir", default="val", type=str)

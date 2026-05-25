@@ -403,7 +403,8 @@ class MyDataset(Dataset):
                  depth_fallback_dir='depth',
                  labels_from_filename=True,
                  pair_list=None,
-                 synthesize_missing_depth=False):
+                 synthesize_missing_depth=False,
+                 mask_mode='red_green'):
         self.istrain = istrain
         # pair_list = [{'image': ..., 'mask': ..., 'depth': ... (optional)}]
         self.pairs = pair_list
@@ -422,6 +423,9 @@ class MyDataset(Dataset):
         self.depth_fallback_dir = depth_fallback_dir
         self.labels_from_filename = labels_from_filename and use_gt
         self.synthesize_missing_depth = synthesize_missing_depth
+        if mask_mode not in ('grayscale', 'red_green'):
+            raise ValueError(f"mask_mode must be 'grayscale' or 'red_green', got {mask_mode!r}")
+        self.mask_mode = mask_mode
         if use_gt and self.labels_from_filename:
             if stoi is None:
                 label_chache = []
@@ -476,7 +480,16 @@ class MyDataset(Dataset):
                         f"No mask found for {image_path} "
                         f"(searched sibling 'masks/' directory)."
                     )
-                gt = cv2.cvtColor(cv2.imread(mask_path),cv2.COLOR_BGR2GRAY)
+                if self.mask_mode == 'red_green':
+                    # 4-color interior-segmentation masks: foreground = pure red (interior)
+                    # OR pure green (mirrors); everything else (blue/black/etc.) is background.
+                    # Produces a clean 0/255 binary GT after the /255 normalize below.
+                    bgr = cv2.imread(mask_path)
+                    R, G, B = bgr[..., 2], bgr[..., 1], bgr[..., 0]
+                    fg = ((R == 255) & (G == 0) & (B == 0)) | ((R == 0) & (G == 255) & (B == 0))
+                    gt = (fg.astype(np.uint8) * 255)
+                else:
+                    gt = cv2.cvtColor(cv2.imread(mask_path),cv2.COLOR_BGR2GRAY)
                 gt = F.interpolate(torch.from_numpy(gt)[None,None,...],size=self.size,mode='nearest')[0][0]
             else:
                 gt = torch.zeros([1,self.size[0],self.size[1]])
@@ -658,6 +671,7 @@ def build_csv_dataset(is_train, args):
         depth_fallback_dir=getattr(args, 'depth_fallback_dir', 'depth'),
         labels_from_filename=labels_from_filename,
         synthesize_missing_depth=synthesize_depth,
+        mask_mode=getattr(args, 'mask_mode', 'red_green'),
     )
 
 
@@ -714,6 +728,7 @@ def build_finetune_dataset(is_train, args):
         depth_gt_dir=depth_gt_dir,
         depth_fallback_dir=depth_fallback_dir,
         labels_from_filename=labels_from_filename,
+        mask_mode=getattr(args, 'mask_mode', 'red_green'),
     )
 
 
