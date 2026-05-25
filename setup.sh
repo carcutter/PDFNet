@@ -154,7 +154,7 @@ fi
 if [[ "$SKIP_DEPTH" != "1" ]]; then
     step "5/5  precompute depth maps via DAM_V2/compute_depth_maps.py"
     any=0
-    for csv in "$DATA_ROOT/train.csv" "$DATA_ROOT/test.csv"; do
+    for csv in "$DATA_ROOT/index.csv" "$DATA_ROOT/train.csv" "$DATA_ROOT/test.csv"; do
         if [[ -f "$csv" ]]; then
             any=1
             echo
