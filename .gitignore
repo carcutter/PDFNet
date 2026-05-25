@@ -1,5 +1,7 @@
 __pycache__
 checkpoints/
-data/
+data/*
+!data/.gitignore
+!data/*.dvc
 logs/
 runs/

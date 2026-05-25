@@ -1,0 +1,6 @@
+[core]
+    remote = storage
+['remote "storage"']
+    url = s3://diffusely-cars-datasets/dvc-cache
+    endpointurl = https://s3.fr-par.scw.cloud
+    region = fr-par
