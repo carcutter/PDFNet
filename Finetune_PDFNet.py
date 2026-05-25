@@ -83,14 +83,14 @@ def get_args_parser():
                         "Note: only the adapter weights resume; optimizer + scheduler restart.")
 
     # ---- data ----
-    p.add_argument("--data_path", default="./data", type=str)
+    p.add_argument("--data_path", default="./data/interior_segmentation", type=str)
     p.add_argument("--dataset_builder", default="csv",
                    choices=["csv", "finetune", "dis"],
                    help="'csv'      = read pairs from --csv_path with 80/20 split (default); "
-                        "'finetune' = ./data/{train,val}/{images,masks,depth} layout; "
+                        "'finetune' = <data_path>/{train,val}/{images,masks,depth} layout; "
                         "'dis'      = original DIS-5K layout under args.data_path")
     # csv-mode
-    p.add_argument("--csv_path", default="data/index.csv", type=str,
+    p.add_argument("--csv_path", default="data/interior_segmentation/index.csv", type=str,
                    help="CSV with image_path,mask_path,depth_path,dataset columns. "
                         "Generate with `python build_dataset_csv.py`.")
     p.add_argument("--val_split", default=0.2, type=float,

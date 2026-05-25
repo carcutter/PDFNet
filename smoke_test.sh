@@ -28,8 +28,8 @@ if [[ ! -f "$CKPT" ]]; then
     echo "      Run: python download_checkpoint.py"
     exit 2
 fi
-if [[ ! -f data/index.csv ]]; then
-    echo "FAIL: dataset CSV missing at data/index.csv"
+if [[ ! -f data/interior_segmentation/index.csv ]]; then
+    echo "FAIL: dataset CSV missing at data/interior_segmentation/index.csv"
     echo "      Run: python build_dataset_csv.py"
     exit 2
 fi

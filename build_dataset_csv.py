@@ -18,7 +18,8 @@ pseudo-depth maps have been generated (DAM_V2/Depth-prepare.ipynb) into
 
 Run:
     python build_dataset_csv.py
-    python build_dataset_csv.py --data-root ./data --out ./data/index.csv --include interior_segmentation
+    python build_dataset_csv.py --data-root ./data/interior_segmentation \
+        --out ./data/interior_segmentation/index.csv --include interior_segmentation
 """
 from __future__ import annotations
 
@@ -62,8 +63,8 @@ def find_depth(stem: str, dataset_dir: Path) -> Path | None:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data-root", default="data", type=Path)
-    ap.add_argument("--out", default="data/index.csv", type=Path)
+    ap.add_argument("--data-root", default="data/interior_segmentation", type=Path)
+    ap.add_argument("--out", default="data/interior_segmentation/index.csv", type=Path)
     ap.add_argument("--include", default="interior_segmentation",
                     help="substring that must appear in the dataset folder name "
                          "(default: 'interior_segmentation')")
