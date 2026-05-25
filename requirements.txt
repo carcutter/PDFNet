@@ -13,3 +13,5 @@ GitPython
 spaces
 matplotlib
 tqdm
+gdown
+tensorboard

@@ -1,19 +1,23 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import random
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
-from typing import Sequence
+from typing import Sequence, List, Optional
 from PIL import Image, ImageEnhance
 import os
+from pathlib import Path
 import cv2
 import torch.nn.functional as F
 from torchvision.transforms.functional import normalize,rotate
 from torchvision.transforms import ColorJitter
 import glob
 from tqdm import tqdm
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+
+
 def get_files(PATH):
     file_lan = []
     if type(PATH) is str:
@@ -26,6 +30,48 @@ def get_files(PATH):
                 for filename in filenames:
                     file_lan.append(os.path.join(filepath,filename))
     return file_lan
+
+
+def _swap_dir(image_path: str, source_dirname: str, target_dirname: str) -> Optional[str]:
+    """Swap the last `<source_dirname>` directory in `image_path` with `<target_dirname>`."""
+    parts = list(Path(image_path).parts)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == source_dirname:
+            parts[i] = target_dirname
+            return str(Path(*parts))
+    return None
+
+
+def _find_aux_file(image_path: str, source_dirname: str, target_dirname: str) -> Optional[str]:
+    """Locate a sibling file under target_dirname matching image_path's stem.
+
+    Tries the exact filename first, then every common image extension. Returns
+    None if no candidate exists on disk.
+    """
+    swapped = _swap_dir(image_path, source_dirname, target_dirname)
+    if swapped is None:
+        return None
+    if os.path.exists(swapped):
+        return swapped
+    p = Path(swapped)
+    stem = p.stem
+    parent = p.parent
+    for ext in IMAGE_EXTS:
+        candidate = parent / f"{stem}{ext}"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _find_depth(image_path: str, variant_dir: str, fallback_dir: str) -> Optional[str]:
+    """Try variant_dir first, then fallback_dir, then return None."""
+    for d in (variant_dir, fallback_dir):
+        if d is None:
+            continue
+        path = _find_aux_file(image_path, "images", d)
+        if path is not None:
+            return path
+    return None
 
 class GOSrandomAffine(object):
     def __init__(self, prob=0.5):
@@ -325,14 +371,58 @@ class GOSTorchRandomCrop(object):
         return sample
 
 class MyDataset(Dataset):
-    def __init__(self,root,transform=[],chached=False,size=[224,224],stoi=None,istrain=0,use_gt=True):
+    """DIS-style segmentation dataset with RGB + pseudo-depth.
+
+    Expected on-disk layout under each `root` (directory passed in):
+        <root>/.../<name>.<ext>                    (image)
+        ../masks/<name>.png                         (GT mask; only if use_gt)
+        ../{depth_small,depth_base,depth_large}/<name>.png  (RGB-paired depth variants)
+        ../depth_large_1024/<name>.png             (training-only depth GT for SiLog loss)
+
+    Any missing depth variant falls back to a single `depth/` directory next to
+    `images/`. Missing files raise clear errors at __getitem__ time.
+
+    Args:
+        depth_variants: dir names to sample from for the RGB-paired depth input
+            during training. Defaults to ('depth_large','depth_base','depth_small').
+            At eval time only the first variant (or `depth_fallback_dir`) is used.
+        depth_gt_dir: dir name holding the supervision target for the SiLog
+            depth-head loss (training only). Defaults to 'depth_large_1024'.
+        depth_fallback_dir: dir name used when variant/GT lookups miss.
+            Default 'depth'.
+        labels_from_filename: if True (default), one-hot labels are parsed from
+            '#'-separated filename tokens (DIS-5K convention). If False, labels
+            are zeros (use this for custom data without DIS naming).
+    """
+    _depth_synth_warned = False  # class-level: print warning once across instances
+
+    def __init__(self,root=None,transform=[],chached=False,size=[224,224],stoi=None,
+                 istrain=0,use_gt=True,
+                 depth_variants=('depth_large','depth_base','depth_small'),
+                 depth_gt_dir='depth_large_1024',
+                 depth_fallback_dir='depth',
+                 labels_from_filename=True,
+                 pair_list=None,
+                 synthesize_missing_depth=False):
         self.istrain = istrain
-        self.imlists = get_files(root)
+        # pair_list = [{'image': ..., 'mask': ..., 'depth': ... (optional)}]
+        self.pairs = pair_list
+        if pair_list is not None:
+            self.imlists = [p['image'] for p in pair_list]
+        else:
+            if root is None:
+                raise ValueError("Either `root` or `pair_list` must be provided.")
+            self.imlists = get_files(root)
         self.transforms = transforms.Compose(transform)
         self.chached = chached
         self.size = size
         self.use_gt = use_gt
-        if use_gt:
+        self.depth_variants = tuple(depth_variants) if depth_variants else ()
+        self.depth_gt_dir = depth_gt_dir
+        self.depth_fallback_dir = depth_fallback_dir
+        self.labels_from_filename = labels_from_filename and use_gt
+        self.synthesize_missing_depth = synthesize_missing_depth
+        if use_gt and self.labels_from_filename:
             if stoi is None:
                 label_chache = []
                 for i in range(len(self.imlists)):
@@ -370,32 +460,76 @@ class MyDataset(Dataset):
             one_hot_label[self.stoi[''.join(self.imlists[index].split('/')[-1].split('#')[0:3])]] = 1
             label =  one_hot_label
         else:
-            im = cv2.cvtColor(cv2.imread(self.imlists[index]),cv2.COLOR_BGR2RGB)
+            image_path = self.imlists[index]
+            pair = self.pairs[index] if self.pairs is not None else None
+
+            im = cv2.cvtColor(cv2.imread(image_path),cv2.COLOR_BGR2RGB)
             raw_size = im.shape[:2]
+            im_orig_gray = None  # populated lazily if we need to synthesize depth
             im = F.interpolate(torch.from_numpy(im).permute(2,0,1)[None,...],size=self.size,mode='bilinear',align_corners=True)[0]
+
             if self.use_gt:
-                gt = cv2.cvtColor(cv2.imread(self.imlists[index].replace('/images','/masks').replace('.jpg','.png')),cv2.COLOR_BGR2GRAY)
+                mask_path = (pair.get('mask') if pair is not None else None) \
+                            or _find_aux_file(image_path, "images", "masks")
+                if mask_path is None:
+                    raise FileNotFoundError(
+                        f"No mask found for {image_path} "
+                        f"(searched sibling 'masks/' directory)."
+                    )
+                gt = cv2.cvtColor(cv2.imread(mask_path),cv2.COLOR_BGR2GRAY)
                 gt = F.interpolate(torch.from_numpy(gt)[None,None,...],size=self.size,mode='nearest')[0][0]
             else:
                 gt = torch.zeros([1,self.size[0],self.size[1]])
+
             one_hot_label = torch.zeros([len(self.stoi)])
-            if self.use_gt:
-                one_hot_label[self.stoi[''.join(self.imlists[index].split('/')[-1].split('#')[0:3])]] = 1
+            if self.use_gt and self.labels_from_filename:
+                key = ''.join(image_path.split('/')[-1].split('#')[0:3])
+                if key in self.stoi:
+                    one_hot_label[self.stoi[key]] = 1
             label =  one_hot_label
-            random_num = random.random()
-            if not self.istrain:
-                random_num=1
-            if random_num > 0.66:
-                depth = cv2.cvtColor(cv2.imread(self.imlists[index].replace('/images','/depth_large')),cv2.COLOR_BGR2GRAY)
-            elif random_num > 0.33:
-                depth = cv2.cvtColor(cv2.imread(self.imlists[index].replace('/images','/depth_base')),cv2.COLOR_BGR2GRAY)
+
+            # ---- depth input ----
+            # Priority: explicit `pair['depth']`, then sibling variant dir, then fallback dir,
+            # then (if enabled) synthesize from grayscale of the input image.
+            if self.istrain and len(self.depth_variants) > 1:
+                variant = random.choice(self.depth_variants)
+            elif len(self.depth_variants) >= 1:
+                variant = self.depth_variants[0]
             else:
-                depth = cv2.cvtColor(cv2.imread(self.imlists[index].replace('/images','/depth_small')),cv2.COLOR_BGR2GRAY)
-            depth = F.interpolate(torch.from_numpy(depth)[None,None,...],size=self.size,mode='bilinear',align_corners=True)[0]
+                variant = None
+            depth_path = (pair.get('depth') if pair is not None else None) \
+                         or _find_depth(image_path, variant, self.depth_fallback_dir)
+            if depth_path is not None:
+                depth = cv2.cvtColor(cv2.imread(depth_path),cv2.COLOR_BGR2GRAY)
+                depth = F.interpolate(torch.from_numpy(depth)[None,None,...],size=self.size,mode='bilinear',align_corners=True)[0]
+            elif self.synthesize_missing_depth:
+                if not MyDataset._depth_synth_warned:
+                    print(f"[MyDataset] No depth files found; synthesizing pseudo-depth "
+                          f"from RGB grayscale. Generate real depth maps via "
+                          f"DAM_V2/Depth-prepare.ipynb for best results.")
+                    MyDataset._depth_synth_warned = True
+                # Grayscale of the (already resized) image as a stand-in depth map.
+                im_orig_gray = (0.299 * im[0] + 0.587 * im[1] + 0.114 * im[2])[None, ...]
+                depth = im_orig_gray.clone()
+            else:
+                raise FileNotFoundError(
+                    f"No depth map found for {image_path}. Tried sibling "
+                    f"'{variant}/' and '{self.depth_fallback_dir}/'. Pass "
+                    f"synthesize_missing_depth=True (or --synthesize_depth) to use "
+                    f"grayscale of the RGB image, or generate real depth maps via "
+                    f"DAM_V2/Depth-prepare.ipynb."
+                )
+
             if self.istrain:
-                large_depth = cv2.cvtColor(cv2.imread(self.imlists[index].replace('/images','/depth_large_1024')),cv2.COLOR_BGR2GRAY)
-                large_depth = F.interpolate(torch.from_numpy(large_depth)[None,None,...],size=self.size,mode='bilinear',align_corners=True)[0]
-                large_depth = torch.divide(large_depth,255.0)
+                gt_depth_path = _find_depth(image_path, self.depth_gt_dir, self.depth_fallback_dir)
+                if gt_depth_path is not None:
+                    large_depth = cv2.cvtColor(cv2.imread(gt_depth_path),cv2.COLOR_BGR2GRAY)
+                    large_depth = F.interpolate(torch.from_numpy(large_depth)[None,None,...],size=self.size,mode='bilinear',align_corners=True)[0]
+                    large_depth = torch.divide(large_depth,255.0)
+                else:
+                    # No depth GT available: reuse the input depth (degenerates SiLog auxiliary loss).
+                    # depth is still 0-255 here; the divide further below applies only to `depth`.
+                    large_depth = torch.divide(depth.clone(), 255.0)
         # depth = torch.zeros_like(im)
         im = torch.divide(im,255.0)
         gt = torch.divide(gt,255.0)
@@ -436,6 +570,153 @@ def build_dataset(is_train,args):
     else:
         valid_data_path = args.data_path+'/DIS-VD/images'
         return MyDataset(valid_data_path,transform=[GOSNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])],chached=args.chached,size=[args.input_size,args.input_size])
+def _load_pair_list_from_csv(csv_path: str, data_root: str):
+    """Read CSV with columns image_path, mask_path, depth_path (optional), dataset.
+
+    Paths are joined with `data_root` if they aren't absolute.
+    """
+    import csv as _csv
+    pairs = []
+    with open(csv_path, newline='') as f:
+        for row in _csv.DictReader(f):
+            img = row['image_path']
+            msk = row.get('mask_path') or None
+            dep = row.get('depth_path') or None
+            if not os.path.isabs(img):
+                img = os.path.join(data_root, img)
+            if msk and not os.path.isabs(msk):
+                msk = os.path.join(data_root, msk)
+            if dep and not os.path.isabs(dep):
+                dep = os.path.join(data_root, dep)
+            pairs.append({
+                'image': img,
+                'mask': msk,
+                'depth': dep,
+                'dataset': row.get('dataset', ''),
+            })
+    return pairs
+
+
+def _split_pairs(pairs, val_frac: float, seed: int):
+    """Shuffle deterministically by seed and split into (train, val)."""
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(pairs))
+    rng.shuffle(idx)
+    n_val = int(round(len(pairs) * val_frac))
+    val_idx = set(idx[:n_val].tolist())
+    train, val = [], []
+    for i, pair in enumerate(pairs):
+        (val if i in val_idx else train).append(pair)
+    return train, val
+
+
+def build_csv_dataset(is_train, args):
+    """Dataset builder that reads (image, mask, depth?) pairs from a CSV
+    and applies an 80/20 (configurable) train/val split.
+
+    Required args:
+        --csv_path: path to the CSV (see build_dataset_csv.py)
+        --data_path: prepended to non-absolute paths in the CSV (default ./data)
+        --val_split: validation fraction (default 0.2)
+        --csv_split_seed: RNG seed for the shuffle (default 42)
+        --synthesize_depth: if True, fall back to grayscale of the RGB image
+            when no depth file is found (good for getting started before
+            DAM-V2 has been run).
+    """
+    csv_path = getattr(args, 'csv_path', 'data/index.csv')
+    val_frac = float(getattr(args, 'val_split', 0.2))
+    seed = int(getattr(args, 'csv_split_seed', 42))
+    synthesize_depth = bool(getattr(args, 'synthesize_depth', False))
+    labels_from_filename = bool(getattr(args, 'labels_from_filename', False))
+
+    pairs = _load_pair_list_from_csv(csv_path, args.data_path)
+    train_pairs, val_pairs = _split_pairs(pairs, val_frac, seed)
+    chosen = train_pairs if is_train else val_pairs
+    print(f"[csv-dataset] {csv_path}: {len(pairs)} total -> "
+          f"train={len(train_pairs)} val={len(val_pairs)} (val_frac={val_frac}, seed={seed})")
+
+    transform = [
+        GOSRandomHFlip(0.5),
+        GOSrandomRotation(0.5),
+        GOSColorEnhance(0.5),
+        GOSRandomGray(0.25),
+        GOSRandomUPCrop(0.5),
+        GOSNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ] if is_train else [
+        GOSNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ]
+
+    return MyDataset(
+        pair_list=chosen,
+        transform=transform,
+        chached=args.chached,
+        size=[args.input_size, args.input_size],
+        istrain=is_train,
+        depth_variants=getattr(args, 'depth_variants',
+                               ('depth_large', 'depth_base', 'depth_small')),
+        depth_gt_dir=getattr(args, 'depth_gt_dir', 'depth_large_1024'),
+        depth_fallback_dir=getattr(args, 'depth_fallback_dir', 'depth'),
+        labels_from_filename=labels_from_filename,
+        synthesize_missing_depth=synthesize_depth,
+    )
+
+
+def build_finetune_dataset(is_train, args):
+    """Dataset builder for fine-tuning on a user-provided directory layout.
+
+    Expects:
+        <args.data_path>/<args.train_subdir>/images/...
+        <args.data_path>/<args.train_subdir>/masks/...
+        <args.data_path>/<args.train_subdir>/depth/...           (single depth dir is fine)
+        <args.data_path>/<args.val_subdir>/images/...
+        <args.data_path>/<args.val_subdir>/masks/...
+        <args.data_path>/<args.val_subdir>/depth/...
+
+    Optional per-variant depth dirs (depth_small/depth_base/depth_large/
+    depth_large_1024) are auto-detected; missing ones fall back to depth/.
+    """
+    train_subdir = getattr(args, 'train_subdir', 'train')
+    val_subdir = getattr(args, 'val_subdir', 'val')
+    depth_variants = getattr(args, 'depth_variants',
+                             ('depth_large','depth_base','depth_small'))
+    depth_gt_dir = getattr(args, 'depth_gt_dir', 'depth_large_1024')
+    depth_fallback_dir = getattr(args, 'depth_fallback_dir', 'depth')
+    labels_from_filename = getattr(args, 'labels_from_filename', False)
+
+    subdir = train_subdir if is_train else val_subdir
+    images_root = os.path.join(args.data_path, subdir, 'images')
+    if not os.path.isdir(images_root):
+        raise FileNotFoundError(
+            f"Expected images at {images_root}. Layout under {args.data_path} should be "
+            f"{subdir}/images/, {subdir}/masks/, {subdir}/depth/ (or per-variant depth dirs)."
+        )
+
+    transform = []
+    if is_train:
+        transform = [
+            GOSRandomHFlip(0.5),
+            GOSrandomRotation(0.5),
+            GOSColorEnhance(0.5),
+            GOSRandomGray(0.25),
+            GOSRandomUPCrop(0.5),
+            GOSNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    else:
+        transform = [GOSNormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]
+
+    return MyDataset(
+        images_root,
+        transform=transform,
+        chached=args.chached,
+        size=[args.input_size, args.input_size],
+        istrain=is_train,
+        depth_variants=depth_variants,
+        depth_gt_dir=depth_gt_dir,
+        depth_fallback_dir=depth_fallback_dir,
+        labels_from_filename=labels_from_filename,
+    )
+
+
 def keep_n_files(directory, n=3):
     files = [(file_path, os.path.getmtime(file_path)) for file_path in glob.glob(os.path.join(directory, '*'))]
     

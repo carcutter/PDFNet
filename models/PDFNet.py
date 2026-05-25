@@ -286,7 +286,7 @@ class PDFNet_process(nn.Module):
         emb = args.emb
         self.Glob = nn.Sequential(make_crs(emb,emb))
         self.decoder = decoder
-        # self.depth_decoder = depth_decoder
+        self.depth_decoder = depth_decoder
         self.decoder.patch_ratio = self.patch_ratio
         self.args=args
 
@@ -473,7 +473,46 @@ class PDFNet_process(nn.Module):
         return [i.sigmoid() for i in pred_m], loss, target_loss
     
     @torch.no_grad()
-    
+    def eval_forward(self, img, depth, gt):
+        """Validation pass: run encode -> decoder and return segmentation-only loss.
+
+        Returns (pred_sigmoid, pred_logits, total_loss, target_loss). Skips the
+        depth_decoder and integrity/SiLog auxiliary terms, since val data may
+        not carry a depth-GT matching the input depth resolution.
+        """
+        depth = (depth-depth.min())/(depth.max()-depth.min())
+        B,C,H,W = img.size()
+        RIMG,RDEPTH,RGT = img, depth, gt
+        if RDEPTH.shape[1] == 1:
+            RDEPTH = RDEPTH.repeat(1,3,1,1)
+        down_ratio = 2
+        patch_ratio = self.patch_ratio
+        Down_RIMG = _upsample_(RIMG,[RIMG.shape[-2]//down_ratio,RIMG.shape[-1]//down_ratio])
+        Down_RDEPTH = _upsample_(RDEPTH,[RDEPTH.shape[-2]//down_ratio,RDEPTH.shape[-1]//down_ratio])
+        Down_img_depth = torch.cat([Down_RIMG,Down_RDEPTH],dim=0)
+
+        latent_I1,latent_I2,latent_I3,latent_I4,x_glob = self.encode(Down_img_depth,self.encoder)
+        Depth_latent_I1,Depth_latent_I2,Depth_latent_I3,Depth_latent_I4,Depth_x_glob = latent_I1[B:2*B],latent_I2[B:2*B],latent_I3[B:2*B],latent_I4[B:2*B],x_glob[B:2*B]
+        latent_I1,latent_I2,latent_I3,latent_I4,x_glob = latent_I1[:B],latent_I2[:B],latent_I3[:B],latent_I4[:B],x_glob[:B]
+
+        patch_img = self.split(RIMG,patch_size=RIMG.shape[-2]//patch_ratio,overlap_ratio=0.)
+        patch_latent_I1,patch_latent_I2,patch_latent_I3,patch_latent_I4,patch_x_glob = self.encode(patch_img,self.encoder)
+        patch_latent_I1 = self.merge(patch_latent_I1,batch_size=B,padding=0)
+        patch_latent_I2 = self.merge(patch_latent_I2,batch_size=B,padding=0)
+        patch_latent_I3 = self.merge(patch_latent_I3,batch_size=B,padding=0)
+        patch_latent_I4 = self.merge(patch_latent_I4,batch_size=B,padding=0)
+        patch_x_glob = self.merge(patch_x_glob,batch_size=B,padding=0)
+
+        pred_m = self.decoder(RIMG,RDEPTH,
+                            [latent_I1,latent_I2,latent_I3,latent_I4,x_glob],
+                            [Depth_latent_I1,Depth_latent_I2,Depth_latent_I3,Depth_latent_I4,Depth_x_glob],
+                            [patch_latent_I1,patch_latent_I2,patch_latent_I3,patch_latent_I4,patch_x_glob])
+
+        loss, target_loss = self.loss_compute(pred_m, RGT)
+        return pred_m[0].sigmoid(), pred_m[0], loss, target_loss
+
+    @torch.no_grad()
+
     def inference(self,img,depth):
         depth = (depth-depth.min())/(depth.max()-depth.min())
         B,C,H,W = img.size()
