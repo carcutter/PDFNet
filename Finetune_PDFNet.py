@@ -35,11 +35,16 @@ TensorBoard logs (under ./runs/<run_tag>/):
 import argparse
 from pathlib import Path
 
+import yaml
+
 from finetune_main import finetune_main
 
 
 def get_args_parser():
     p = argparse.ArgumentParser("PDFNet fine-tuning", add_help=False)
+    p.add_argument("--config", default="config/training/lora.yaml", type=str,
+                   help="YAML file providing default values for any argument below. "
+                        "Pass --config '' to disable. CLI args always override YAML.")
 
     # ---- core training ----
     p.add_argument("--batch_size", default=1, type=int)
@@ -158,8 +163,34 @@ def get_args_parser():
     return p
 
 
+def _apply_yaml_defaults(parser: argparse.ArgumentParser, config_path: str) -> None:
+    """Replace parser defaults with values from a YAML mapping. Unknown keys raise."""
+    if not config_path:
+        return
+    path = Path(config_path)
+    if not path.is_file():
+        print(f"[config] {path} not found — using built-in defaults", flush=True)
+        return
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"[config] {path}: expected mapping at root, got {type(data).__name__}"
+        )
+    valid = {a.dest for a in parser._actions if a.dest != "help"}
+    unknown = sorted(set(data) - valid)
+    if unknown:
+        raise SystemExit(f"[config] {path}: unknown keys {unknown}")
+    parser.set_defaults(**data)
+    print(f"[config] loaded {len(data)} keys from {path}", flush=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("PDFNet fine-tune script", parents=[get_args_parser()])
+    # Two-pass parse: read --config from CLI, fold its values into parser defaults,
+    # then re-parse so CLI args override YAML values.
+    prelim, _ = parser.parse_known_args()
+    _apply_yaml_defaults(parser, prelim.config)
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=False, exist_ok=True)

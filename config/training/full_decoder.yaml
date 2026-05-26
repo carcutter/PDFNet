@@ -1,0 +1,39 @@
+# Defaults for LoRA fine-tuning on the interior-segmentation data.
+# CLI args passed to Finetune_PDFNet.py always override these.
+
+# === mode + base checkpoint ===
+mode: full                   # full | lora
+checkpoint: checkpoints/PDFNet_Best.pth
+freeze_backbone: true       # full mode only
+
+# === data ===
+dataset_builder: csv         # csv | finetune | dis
+csv_path: data/interior_segmentation/index_clean.csv
+data_path: data/interior_segmentation
+val_split: 0.1
+csv_split_seed: 42
+mask_mode: red_green         # red_green => fg = pure red (interior) OR pure green (mirrors)
+synthesize_depth: false      # true => fall back to RGB-gray when no depth file found
+
+# === training schedule ===
+batch_size: 2
+epochs: 30
+update_freq: 1               # gradient-accumulation steps
+num_workers: 8
+seed: 0
+
+# === optimizer / LR schedule ===
+opt: adamw
+lr: 1.0e-5
+warmup_lr: 1.0e-6
+min_lr: 1.0e-6
+warmup_epochs: 2
+weight_decay: 1.0e-4
+sched: cosine
+
+# === evaluation + output ===
+eval_metric: F1              # F1 | MAE
+checkpoints_save_path: checkpoints/finetune
+log_batch_every: 1
+log_grid_n: 4
+COPY: false                   # snapshot project source under valid_sample/<run>/project_copy/

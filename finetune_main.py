@@ -408,7 +408,11 @@ def finetune_main(args):
     scaler = GradScaler()
 
     train_time = str(datetime.datetime.today()).replace(" ", "_").replace(":", "_")[:-7]
-    run_tag = f"{model_name}_{args.mode}_{train_time}"
+    # Include the config file stem in the run tag so runs are grouped by their
+    # config. Falls back to args.mode when --config is empty.
+    config_stem = Path(getattr(args, "config", "") or "").stem
+    run_id_part = config_stem or args.mode
+    run_tag = f"{model_name}_{run_id_part}_{train_time}"
     ckpt_dir = os.path.join(args.checkpoints_save_path, run_tag)
     log_dir = os.path.join("runs", run_tag)
     valid_dir = os.path.join("valid_sample", run_tag)
