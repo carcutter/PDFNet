@@ -154,6 +154,22 @@ def get_args_parser():
                    help="number of samples in the augmented-batch grid")
     p.add_argument("--eval_metric", default="F1", choices=["F1", "MAE"],
                    help="metric used to decide 'best' checkpoint")
+    # ---- contour-IoU auxiliary loss ----
+    p.add_argument("--contour_iou_weight", default=0.0, type=float,
+                   help="weight for the soft 1-IoU loss computed inside a band "
+                        "around the GT contour (0 = disabled). Layered on top of "
+                        "structure_loss + 0.5*SSIM; same weight is applied to "
+                        "the final + side predictions (with side preds at 0.5x).")
+    p.add_argument("--contour_iou_ksize", default=15, type=int,
+                   help="side length (px) of the morphological kernel used to "
+                        "build the boundary band. Larger -> wider band.")
+    # ---- depth-weighted background loss ----
+    p.add_argument("--depth_bg_weight", default=0.0, type=float,
+                   help="weight for BCE-against-0 on background pixels, with "
+                        "each pixel weighted by its depth value. Suppresses "
+                        "salient-looking BG bleeding through from the depth "
+                        "prior. Applied to final + side preds (sides at 0.5x). "
+                        "0 = disabled.")
     p.add_argument("--DEBUG", default=False, type=bool,
                    help="disables checkpoint saving and tensorboard writes")
     p.add_argument("--smoke_test", default=0, type=int,

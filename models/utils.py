@@ -237,6 +237,72 @@ def iou_loss(pred, mask):
     iou = 1 - (inter + eps) / (union + eps)
     return iou.mean()
 
+
+def depth_weighted_bg_loss(pred, mask, depth, eps=1e-6):
+    """Penalise foreground predictions on background pixels, weighted by depth.
+
+    For every background pixel (mask == 0), compute BCE against 0 — i.e.
+    -log(1 - sigmoid(pred)) — and weight it by `depth`. Foreground pixels
+    contribute zero, so this only targets "the model thinks it's FG but it's
+    BG" mistakes, with more weight where the depth map looked FG-like
+    (which is the failure mode this loss is meant to suppress: salient
+    background bleeding through from the depth prior).
+
+    `depth` is expected in [0, 1]. The model's forward pass already
+    min/max-normalises the input depth, so passing that tensor through works.
+    The loss is normalised by total weight, so its magnitude is comparable
+    across images with different background area / depth distributions.
+
+    Args:
+        pred:  logits, shape (B, 1, H, W).
+        mask:  0/1 GT, shape (B, 1, H, W).
+        depth: per-pixel depth in [0, 1], broadcastable to mask's shape.
+    """
+    if depth.dim() == 3:
+        depth = depth.unsqueeze(1)
+    if depth.shape[1] > 1:
+        depth = depth.mean(dim=1, keepdim=True)
+    if depth.shape[-2:] != mask.shape[-2:]:
+        depth = F.interpolate(depth, size=mask.shape[-2:], mode='bilinear',
+                              align_corners=False)
+    bg = 1.0 - mask
+    weight = bg * depth.clamp(0.0, 1.0)
+    # BCE against target=0: -log(1 - sigmoid(pred)) = -logsigmoid(-pred)
+    log_neg = -F.logsigmoid(-pred)
+    return (log_neg * weight).sum() / (weight.sum() + eps)
+
+
+def contour_iou_loss(pred, mask, ksize=15, eps=1e-6):
+    """Soft 1-IoU restricted to a band around the GT contour.
+
+    The band is the morphological gradient of `mask` (dilation - erosion with a
+    ksize x ksize square kernel) — it's 1 inside a `ksize`-wide strip straddling
+    every GT boundary pixel and 0 everywhere else. Inside the band we compute a
+    standard soft IoU between sigmoid(pred) and mask. This penalises boundary
+    mis-localisation explicitly, on top of the boundary-reweighted BCE/IoU that
+    `structure_loss` already provides.
+
+    Args:
+        pred:  logits, shape (B, 1, H, W).
+        mask:  0/1 ground truth, shape (B, 1, H, W).
+        ksize: side length of the morphological kernel. Larger -> wider band,
+               softer localisation. 15 (~1% of a 1024px input) is a reasonable
+               default.
+    """
+    if ksize % 2 == 0:
+        ksize += 1  # max_pool needs odd kernel for symmetric padding
+    pad = ksize // 2
+    dilated = F.max_pool2d(mask, kernel_size=ksize, stride=1, padding=pad)
+    eroded = -F.max_pool2d(-mask, kernel_size=ksize, stride=1, padding=pad)
+    band = (dilated - eroded).clamp(0.0, 1.0)  # 1 in a ksize-wide ring around contour
+
+    p = torch.sigmoid(pred) * band
+    g = mask * band
+    inter = (p * g).sum(dim=(2, 3))
+    union = (p + g - p * g).sum(dim=(2, 3))
+    iou = (inter + eps) / (union + eps)
+    return (1 - iou).mean()
+
 def dice_loss(pred, mask):
     eps = 1e-6
     N = pred.size()[0]

@@ -6,7 +6,8 @@ from einops import rearrange
 from .swin_transformer import SwinB
 from .utils import RMSNorm,SwiGLU,\
     structure_loss,show_gray_images,_upsample_,_upsample_like,\
-    SSIMLoss,IntegrityPriorLoss,SiLogLoss
+    SSIMLoss,IntegrityPriorLoss,SiLogLoss,contour_iou_loss,\
+    depth_weighted_bg_loss
 from timm.models.layers import trunc_normal_
 
 def make_crs(in_dim, out_dim):
@@ -311,16 +312,21 @@ class PDFNet_process(nn.Module):
     
     def loss_compute(self,Pred,GT):
         loss = 0
+        contour_w = float(getattr(self.args, 'contour_iou_weight', 0.0) or 0.0)
+        contour_k = int(getattr(self.args, 'contour_iou_ksize', 15) or 15)
         for i in range(len(Pred)):
             if Pred[i].shape[2:] != GT.shape[2:]:
                 up_pred = F.interpolate(Pred[i],size=GT.shape[2:],mode='bilinear')
             else:
                 up_pred = Pred[i]
+            term = structure_loss(up_pred,GT) + self.SSIMLoss(up_pred.sigmoid(),GT) * 0.5
+            if contour_w > 0:
+                term = term + contour_w * contour_iou_loss(up_pred, GT, ksize=contour_k)
             if i == 0:
-                target_loss = structure_loss(up_pred,GT) + self.SSIMLoss(up_pred.sigmoid(),GT) * 0.5
+                target_loss = term
                 loss = loss + target_loss
             else:
-                loss = loss + (structure_loss(up_pred,GT) + self.SSIMLoss(up_pred.sigmoid(),GT) * 0.5) * 0.5
+                loss = loss + term * 0.5
         return loss, target_loss
     
     def Integrity_Loss(self,Pred,depth,gt):
@@ -335,6 +341,27 @@ class PDFNet_process(nn.Module):
                 loss = loss + target_loss
             else:
                 loss = loss + (self.IntegrityPriorLoss(up_pred.sigmoid(),depth,gt)) * 0.5
+        return loss, target_loss
+
+    def Depth_BG_Loss(self, Pred, depth, gt):
+        """Penalise FG predictions on BG pixels, weighted by input depth.
+
+        Applied across [final, side_1..side_4] with the final at 1x and side
+        predictions at 0.5x, mirroring `Integrity_Loss` / `loss_compute`.
+        """
+        loss = 0
+        target_loss = 0
+        for i in range(len(Pred)):
+            if Pred[i].shape[2:] != gt.shape[2:]:
+                up_pred = F.interpolate(Pred[i], size=gt.shape[2:], mode='bilinear')
+            else:
+                up_pred = Pred[i]
+            term = depth_weighted_bg_loss(up_pred, gt, depth)
+            if i == 0:
+                target_loss = term
+                loss = loss + target_loss
+            else:
+                loss = loss + term * 0.5
         return loss, target_loss
 
     def depth_loss(self,Pred,GT):
@@ -459,6 +486,14 @@ class PDFNet_process(nn.Module):
 
         loss = loss + integrity_loss/2 + depth_loss/10
         # loss = loss + integrity_loss/2
+
+        depth_bg_w = float(getattr(self.args, 'depth_bg_weight', 0.0) or 0.0)
+        if depth_bg_w > 0:
+            # Use the (already min/max-normalised) input depth, not depth_gt:
+            # this targets exactly the depth signal the encoder saw and that's
+            # bleeding through into the prediction.
+            depth_bg_loss, _ = self.Depth_BG_Loss(pred_m, depth, RGT)
+            loss = loss + depth_bg_w * depth_bg_loss
 
         if self.args.DEBUG:
             print(pred_m[0].shape)
